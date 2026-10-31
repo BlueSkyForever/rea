@@ -109,29 +109,23 @@ export type ProcessCaptureComparison = z.infer<
   typeof processCaptureComparisonSchema
 >;
 
-const terminalObservations = (capture: ProcessCapture): readonly unknown[] =>
-  [
-    ...capture.frames.map((frame) => ({
-      kind: "raw" as const,
-      ...comparableTerminalFrame(frame),
-    })),
-    ...capture.rendered_frames.map((frame) => ({
-      kind: "rendered" as const,
-      ...frame,
-    })),
-  ].sort((left, right) => {
-    const time = left.at_ms - right.at_ms;
-    if (time !== 0) return time;
-    if (left.kind !== right.kind) return left.kind === "raw" ? -1 : 1;
-    return left.sequence - right.sequence;
-  });
+const terminalObservations = (capture: ProcessCapture): readonly unknown[] => [
+  ...capture.frames.map((frame) => ({
+    kind: "raw" as const,
+    ...comparableTerminalFrame(frame),
+  })),
+  ...capture.rendered_frames.map((frame) => ({
+    kind: "rendered" as const,
+    ...frame,
+  })),
+];
 
 const sameJsonValue = (left: unknown, right: unknown): boolean => {
   const encodedLeft = canonicalize(left);
   return encodedLeft !== undefined && encodedLeft === canonicalize(right);
 };
 
-/** Canonical observations for one process-comparison dimension. */
+/** Retained observations for diagnostics and explicit trace matching. */
 export const processDimensionObservations = (
   capture: ProcessCapture,
   dimension: (typeof PROCESS_COMPARISON_DIMENSIONS)[number],
@@ -147,6 +141,66 @@ export const processDimensionObservations = (
       return capture.filesystem_checkpoints;
     case "process":
       return capture.process_samples;
+  }
+};
+
+/**
+ * Project semantic comparison facts while retaining capture-local timing in
+ * the source Evidence and first-divergence diagnostics. Scheduler and observer
+ * latency describe when a fact was collected, not a behavioral difference.
+ * Callers that need timing assertions can select them explicitly with a trace.
+ */
+const comparableProcessDimensionObservations = (
+  capture: ProcessCapture,
+  dimension: ProcessComparisonDimension,
+): readonly unknown[] => {
+  switch (dimension) {
+    case "terminal":
+      return [
+        ...capture.frames.map(({ sequence, data }) => ({
+          kind: "raw" as const,
+          sequence,
+          data,
+        })),
+        ...capture.rendered_frames.map(({ at_ms: _atMs, ...frame }) => ({
+          kind: "rendered" as const,
+          ...frame,
+        })),
+      ];
+    case "interaction":
+      return capture.interaction_events.map(
+        ({ dispatched_at_ms: _dispatchedAtMs, ...event }) => event,
+      );
+    case "exit": {
+      const { finalization, ...exit } = capture.exit;
+      const { elapsed_ms: _settlementElapsedMs, ...settlement } =
+        capture.settlement;
+      return [
+        {
+          ...exit,
+          ...(finalization === undefined
+            ? {}
+            : {
+                finalization: {
+                  requested_ms: finalization.requested_ms,
+                  exit_code: finalization.exit_code,
+                  signals: finalization.signals.map(
+                    ({ sent_at_ms: _sentAtMs, ...signal }) => signal,
+                  ),
+                },
+              }),
+          settlement,
+        },
+      ];
+    }
+    case "filesystem":
+      return capture.filesystem_checkpoints.map(
+        ({ at_ms: _atMs, ...checkpoint }) => checkpoint,
+      );
+    case "process":
+      return capture.process_samples.map(
+        ({ at_ms: _atMs, ...sample }) => sample,
+      );
   }
 };
 
@@ -284,17 +338,21 @@ const eventTime = (
 
 const firstCollectionDivergence = (
   dimension: DivergenceDimension,
-  left: readonly unknown[],
-  right: readonly unknown[],
+  leftComparable: readonly unknown[],
+  rightComparable: readonly unknown[],
+  leftObserved: readonly unknown[],
+  rightObserved: readonly unknown[],
 ): Extract<
   ProcessCaptureComparison["first_divergence"],
   { readonly status: "found" }
 > | null => {
-  const length = Math.max(left.length, right.length);
+  const length = Math.max(leftComparable.length, rightComparable.length);
   for (let index = 0; index < length; index += 1) {
-    const leftValue = left[index] ?? null;
-    const rightValue = right[index] ?? null;
-    if (sameJsonValue(leftValue, rightValue)) continue;
+    const leftComparisonValue = leftComparable[index] ?? null;
+    const rightComparisonValue = rightComparable[index] ?? null;
+    if (sameJsonValue(leftComparisonValue, rightComparisonValue)) continue;
+    const leftValue = leftObserved[index] ?? null;
+    const rightValue = rightObserved[index] ?? null;
     return {
       status: "found",
       dimension,
@@ -503,8 +561,8 @@ const compareDimensions = (
     processSourceTruncated(right, source)
       ? "unknown"
       : classifyCollection(
-          processDimensionObservations(left, dimension),
-          processDimensionObservations(right, dimension),
+          comparableProcessDimensionObservations(left, dimension),
+          comparableProcessDimensionObservations(right, dimension),
         );
   return {
     terminal: classify("terminal", "terminal_rendered"),
@@ -513,8 +571,8 @@ const compareDimensions = (
       hasUnknown(left, "exit") || hasUnknown(right, "exit")
         ? "unknown"
         : sameJsonValue(
-              processDimensionObservations(left, "exit"),
-              processDimensionObservations(right, "exit"),
+              comparableProcessDimensionObservations(left, "exit"),
+              comparableProcessDimensionObservations(right, "exit"),
             )
           ? "unchanged"
           : "changed",
@@ -559,6 +617,8 @@ export const compareProcessCaptures = (
       ? null
       : firstCollectionDivergence(
           dimension,
+          comparableProcessDimensionObservations(left, dimension),
+          comparableProcessDimensionObservations(right, dimension),
           processDimensionObservations(left, dimension),
           processDimensionObservations(right, dimension),
         ),

@@ -412,7 +412,7 @@ describe("process trace dimension attribution", () => {
     },
   );
 
-  it("applies passing filesystem trace timestamp omissions to exact comparison", () => {
+  it("keeps filesystem observer timing non-semantic with or without a trace", () => {
     const base = capture(values(["terminal", "process"]));
     const left = base;
     const right = parseProcessCapture({
@@ -437,8 +437,8 @@ describe("process trace dimension attribution", () => {
     );
 
     expect(compareProcessCaptures(left, right)).toMatchObject({
-      filesystem: "changed",
-      first_divergence: { status: "found", dimension: "filesystem" },
+      filesystem: "unchanged",
+      first_divergence: { status: "none" },
     });
     expect(
       compareProcessCaptures(left, right, {

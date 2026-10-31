@@ -1,3 +1,4 @@
+import { resolvePairedEvidenceRequest } from "../application/EvidenceInputResolver.js";
 import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
 
 import type { BinarySessionPort } from "../application/binary/BinarySessionPort.js";
@@ -96,9 +97,23 @@ export const registerProcessComparisonTool = (
         contract.name,
         context.mcpReq.signal,
         async () => {
-          const left = parseCaptureSide(contract.name, "left", input.left);
+          const resolved = resolvePairedEvidenceRequest(
+            input,
+            session.evidenceForAnalysis.bind(session),
+          );
+          if (!resolved.ok)
+            return server.delivery.toCallToolResult(resolved, contract);
+          const left = parseCaptureSide(
+            contract.name,
+            "left",
+            resolved.value.left,
+          );
           if (!left.ok) return server.delivery.toCallToolResult(left, contract);
-          const right = parseCaptureSide(contract.name, "right", input.right);
+          const right = parseCaptureSide(
+            contract.name,
+            "right",
+            resolved.value.right,
+          );
           if (!right.ok)
             return server.delivery.toCallToolResult(right, contract);
           const { record: leftRecord } = left.value;
