@@ -19,6 +19,7 @@ import {
   accountFullyObservedProcessCapture,
   compareUnverifiedProcessCaptures as compareProcessCaptures,
   emptyProcessCapture as emptyCapture,
+  FINALIZED_PROCESS_CAPTURE_EXAMPLE,
 } from "./processCapture.fixture.js";
 
 const compareFullyObserved = (
@@ -31,6 +32,148 @@ const compareFullyObserved = (
     accountFullyObservedProcessCapture(right),
     options,
   );
+
+it("ignores capture-local timing when every observed behavior is identical", () => {
+  const base = parseProcessCapture(FINALIZED_PROCESS_CAPTURE_EXAMPLE);
+  const finalization = base.exit.finalization;
+  if (finalization === undefined)
+    throw new Error("Finalization fixture must retain its deadline outcome");
+  const capture = (atMs: number) => ({
+    ...base,
+    frames: [{ sequence: 0, at_ms: atMs, data: "deterministic output" }],
+    rendered_frames: [
+      {
+        sequence: 0,
+        at_ms: atMs,
+        columns: 20,
+        rows: 1,
+        cursor_x: 20,
+        cursor_y: 0,
+        active_buffer: "normal" as const,
+        lines: ["deterministic output"],
+        serialized_state: "deterministic output",
+      },
+    ],
+    interaction_events: [
+      {
+        sequence: 0,
+        scheduled_at_ms: 5,
+        dispatched_at_ms: atMs + 5,
+        type: "input" as const,
+        data: "request",
+        outcome: "dispatched" as const,
+      },
+    ],
+    exit: {
+      ...base.exit,
+      finalization: {
+        ...finalization,
+        elapsed_ms: atMs + 12,
+        signals: finalization.signals.map((signal) => ({
+          ...signal,
+          sent_at_ms: atMs,
+        })),
+      },
+    },
+    settlement: { ...base.settlement, elapsed_ms: atMs + 50 },
+    process_samples: [
+      {
+        at_ms: atMs + 10,
+        pid: 1,
+        parent_pid: 0,
+        process_group_id: 1,
+        session_id: 1,
+        command: "deterministic-cli",
+      },
+    ],
+    filesystem_checkpoints: base.filesystem_checkpoints.map(
+      (checkpoint, index) => ({
+        ...checkpoint,
+        at_ms: index === 0 ? 0 : atMs + 50,
+      }),
+    ),
+  });
+
+  expect(compareFullyObserved(capture(10), capture(30))).toMatchObject({
+    status: "unchanged",
+    terminal: "unchanged",
+    interaction: "unchanged",
+    exit: "unchanged",
+    filesystem: "unchanged",
+    process: "unchanged",
+    first_divergence: { status: "none" },
+  });
+});
+
+it("still reports semantic differences when capture-local timing also differs", () => {
+  const base = emptyCapture();
+  const file = (sha256: string) => ({
+    path: "root_0:result.txt",
+    type: "file" as const,
+    mode: 0o644,
+    size: 6,
+    sha256,
+    symlink_target: null,
+  });
+  const capture = (side: "left" | "right") => {
+    const atMs = side === "left" ? 10 : 30;
+    const observedFile = file((side === "left" ? "a" : "b").repeat(64));
+    return {
+      ...base,
+      frames: [
+        {
+          sequence: 0,
+          at_ms: atMs,
+          data: side === "left" ? "left output" : "right output",
+        },
+      ],
+      interaction_events: [
+        {
+          sequence: 0,
+          scheduled_at_ms: 5,
+          dispatched_at_ms: atMs + 5,
+          type: "input" as const,
+          data: "request",
+          outcome:
+            side === "left" ? ("dispatched" as const) : ("failed" as const),
+        },
+      ],
+      exit: { ...base.exit, code: side === "left" ? 0 : 2 },
+      settlement: { ...base.settlement, elapsed_ms: atMs + 50 },
+      process_samples: [
+        {
+          at_ms: atMs + 10,
+          pid: 1,
+          parent_pid: 0,
+          process_group_id: 1,
+          session_id: 1,
+          command: side === "left" ? "worker-a" : "worker-b",
+        },
+      ],
+      files_before: [observedFile],
+      files_after: [observedFile],
+      filesystem_checkpoints: base.filesystem_checkpoints.map(
+        (checkpoint, index) => ({
+          ...checkpoint,
+          at_ms: index === 0 ? 0 : atMs + 50,
+          files: [observedFile],
+        }),
+      ),
+    };
+  };
+
+  expect(compareFullyObserved(capture("left"), capture("right"))).toMatchObject(
+    {
+      status: "changed",
+      terminal: "changed",
+      interaction: "changed",
+      exit: "changed",
+      filesystem: "changed",
+      process: "changed",
+      first_divergence: { status: "found" },
+    },
+  );
+});
 
 it("does not turn unresolved filesystem effects into equality or a definite change", () => {
   const capture = emptyCapture();
